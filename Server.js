@@ -3,76 +3,60 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const { fork } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Statik dosyaları sunmak için "public" klasörünü kullan
+// Statik dosyaları sunar
+app.use(express.static('public'));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Her ID için kod içeriğini tutan basit bir bellek veritabanı
-const codeStore = {};
+// Bellekte çalışan kod süreçlerini tutmak için
+const runningProcesses = {};
 
-// ---
-// ## 1. Ana Sayfa: Kod Giriş Formu
-// ---
+// Kullanıcıdan kod almak için anasayfa
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <title>Node.js Kod Sunucusu</title>
+            <title>Node.js Hosting Servisi</title>
             <style>
-                body { font-family: sans-serif; padding: 20px; background-color: #f4f4f9; color: #333; }
-                .container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                h1 { color: #2c3e50; text-align: center; }
-                p { text-align: center; color: #7f8c8d; }
+                body { font-family: sans-serif; padding: 20px; background-color: #282c34; color: #abb2bf; }
+                .container { max-width: 800px; margin: auto; background: #333741; padding: 20px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+                h1 { color: #61afef; text-align: center; }
+                p { text-align: center; color: #5c6370; }
                 form { display: flex; flex-direction: column; gap: 15px; }
-                label { font-weight: bold; color: #555; }
+                label { font-weight: bold; color: #c678dd; }
                 input[type="text"], textarea { 
-                    width: 100%; 
-                    padding: 10px; 
-                    border: 1px solid #ccc; 
-                    border-radius: 5px; 
-                    box-sizing: border-box; 
-                    font-family: monospace; 
+                    width: 100%; padding: 10px; border: 1px solid #4b5263; border-radius: 5px; box-sizing: border-box; 
+                    background-color: #3b4048; color: #abb2bf; font-family: monospace; 
                 }
                 button { 
-                    background-color: #3498db; 
-                    color: white; 
-                    padding: 12px 20px; 
-                    border: none; 
-                    border-radius: 5px; 
-                    cursor: pointer; 
-                    font-size: 16px; 
-                    transition: background-color 0.3s;
+                    background-color: #98c379; color: #282c34; padding: 12px 20px; border: none; border-radius: 5px; 
+                    cursor: pointer; font-size: 16px; font-weight: bold; transition: background-color 0.3s;
                 }
-                button:hover { background-color: #2980b9; }
-                .link-box { 
-                    margin-top: 20px; 
-                    padding: 15px; 
-                    background-color: #e8f5e9; 
-                    border: 1px solid #c8e6c9; 
-                    border-radius: 5px; 
-                    text-align: center;
-                }
+                button:hover { background-color: #83b169; }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>Yeni Bir Kod Sunucusu Oluştur</h1>
-                <p>Kendi ID'nizi ve kodunuzu girerek özel bir sunucu sayfası oluşturun.</p>
+                <h1>Kendi Node.js Kodunu Yayınla</h1>
+                <p>Aşağıdaki forma kodunuzu girin. Kodunuz ayrı bir süreçte çalıştırılacak ve çıktısı size gösterilecektir.</p>
                 <form action="/publish" method="POST">
-                    <label for="id">Sunucu ID'si:</label>
-                    <input type="text" id="id" name="id" required placeholder="Örn: benim-projem">
+                    <label for="id">Proje ID'si:</label>
+                    <input type="text" id="id" name="id" required placeholder="Örn: ilk-projem">
                     
                     <label for="code">Kod İçeriği:</label>
-                    <textarea id="code" name="code" rows="15" required placeholder="const http = require('http'); ..."></textarea>
+                    <textarea id="code" name="code" rows="15" required placeholder="console.log('Merhaba Dünya!');"></textarea>
                     
-                    <button type="submit">Yayınla</button>
+                    <button type="submit">Yayınla ve Çalıştır</button>
                 </form>
             </div>
         </body>
@@ -80,9 +64,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// ---
-// ## 2. Kod Yayınlama ve Link Oluşturma
-// ---
+// Kodun yayınlandığı ve çalıştırıldığı yer
 app.post('/publish', (req, res) => {
     const { id, code } = req.body;
 
@@ -90,16 +72,47 @@ app.post('/publish', (req, res) => {
         return res.status(400).send('ID ve kod içeriği zorunludur.');
     }
 
-    // Kod içeriğini bellekte sakla
-    codeStore[id] = code;
-    console.log(`Yeni kod kaydedildi: ID -> ${id}`);
+    // Önceki süreci durdur (eğer varsa)
+    if (runningProcesses[id] && !runningProcesses[id].killed) {
+        runningProcesses[id].kill();
+        console.log(`Eski süreç durduruldu: ${id}`);
+    }
+
+    // Kodu bir dosyaya kaydet
+    const filePath = path.join(__dirname, 'hosted-code', `${id}.js`);
+    fs.writeFileSync(filePath, code, 'utf-8');
+
+    // Ayrı bir Node.js süreci başlat
+    const child = fork(filePath, { silent: true });
+    runningProcesses[id] = child;
+    console.log(`Yeni süreç başlatıldı: ${id}`);
+
+    // Süreç çıktısını (stdout) yakala ve Socket.IO ile gönder
+    const namespace = io.of(`/${id}`);
+    child.stdout.on('data', (data) => {
+        namespace.emit('log', data.toString());
+    });
+
+    // Süreç hata çıktısını (stderr) yakala
+    child.stderr.on('data', (data) => {
+        namespace.emit('log', `HATA: ${data.toString()}`);
+    });
+
+    // Süreç sonlandığında temizle
+    child.on('exit', (code, signal) => {
+        console.log(`Süreç sonlandı: ${id}, Çıkış Kodu: ${code}`);
+        namespace.emit('log', `\n--- Süreç sonlandı (Çıkış Kodu: ${code}) ---`);
+        delete runningProcesses[id];
+        // Dosyayı sil
+        fs.unlinkSync(filePath);
+    });
 
     res.send(`
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <title>Başarılı</title>
+            <title>Yayın Başarılı</title>
             <style>
                 body { font-family: sans-serif; padding: 20px; text-align: center; }
                 .container { max-width: 600px; margin: auto; padding: 20px; border: 1px solid #ccc; border-radius: 8px; }
@@ -107,8 +120,8 @@ app.post('/publish', (req, res) => {
         </head>
         <body>
             <div class="container">
-                <h1>Kodunuz Başarıyla Yayınlandı!</h1>
-                <p>Sunucunuz hazır. Aşağıdaki bağlantıya tıklayarak kodunuza erişin:</p>
+                <h1>Kodunuz Çalıştırılıyor!</h1>
+                <p>Projeniz başarıyla başlatıldı. Canlı çıktıyı görmek için aşağıdaki bağlantıya tıklayın:</p>
                 <a href="/server/${id}">http://localhost:3000/server/${id}</a>
             </div>
         </body>
@@ -116,13 +129,11 @@ app.post('/publish', (req, res) => {
     `);
 });
 
-// ---
-// ## 3. Özel ID Sunucu Sayfası
-// ---
+// Çalıştırılan kodun çıktısını gösteren sayfa
 app.get('/server/:id', (req, res) => {
     const id = req.params.id;
-    if (!codeStore[id]) {
-        return res.status(404).send('Bu ID ile kayıtlı bir kod bulunamadı.');
+    if (!runningProcesses[id]) {
+        return res.status(404).send('Bu ID ile çalışan bir kod bulunamadı.');
     }
 
     res.send(`
@@ -130,42 +141,52 @@ app.get('/server/:id', (req, res) => {
         <html lang="en">
         <head>
             <meta charset="UTF-8">
-            <title>Sunucu: ${id}</title>
+            <title>Sunucu Çıktısı: ${id}</title>
             <style>
-                body { font-family: sans-serif; padding: 20px; background-color: #2c3e50; color: #ecf0f1; }
-                .container { max-width: 900px; margin: auto; padding: 20px; }
-                h1 { color: #3498db; text-align: center; }
-                pre { 
-                    background-color: #34495e; 
+                body { font-family: monospace; padding: 20px; background-color: #1e1e1e; color: #d4d4d4; }
+                .container { max-width: 900px; margin: auto; }
+                h1 { color: #569cd6; text-align: center; }
+                .console { 
+                    background-color: #252526; 
+                    border: 1px solid #3c3c3c; 
                     padding: 15px; 
                     border-radius: 8px; 
-                    overflow-x: auto; 
+                    min-height: 400px; 
+                    overflow-y: scroll;
                     white-space: pre-wrap;
                     word-wrap: break-word;
                 }
-                code { color: #f1c40f; }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>Sunucu ID: ${id}</h1>
-                <p>Bu sunucuya ait kod içeriği:</p>
-                <pre id="code-display"><code>${codeStore[id]}</code></pre>
+                <h1>Proje Çıktısı: ${id}</h1>
+                <p>Aşağıda kodunuzun canlı konsol çıktısını görebilirsiniz:</p>
+                <div class="console" id="console-output"></div>
             </div>
+            
+            <script src="/socket.io/socket.io.js"></script>
+            <script>
+                const id = window.location.pathname.split('/').pop();
+                const socket = io('/' + id);
+                const consoleOutput = document.getElementById('console-output');
+                
+                socket.on('connect', () => {
+                    consoleOutput.innerHTML += '<span style="color: #9cdb84;">--- Sunucuya bağlandı. Canlı çıkış bekleniyor... ---</span><br>';
+                });
+                
+                socket.on('log', (data) => {
+                    consoleOutput.innerHTML += data.replace(/</g, "&lt;").replace(/>/g, "&gt;") + '<br>';
+                    consoleOutput.scrollTop = consoleOutput.scrollHeight; // En aşağı kaydır
+                });
+
+                socket.on('disconnect', () => {
+                    consoleOutput.innerHTML += '<span style="color: #f07178;">--- Sunucu bağlantısı kesildi ---</span><br>';
+                });
+            </script>
         </body>
         </html>
     `);
-});
-
-// ---
-// ## 4. Socket.IO Namespace ve Bağlantı Yönetimi
-// ---
-io.on('connection', (socket) => {
-    console.log('Bir kullanıcı genel sunucuya bağlandı.');
-    
-    socket.on('disconnect', () => {
-        console.log('Genel sunucudan bir kullanıcı ayrıldı.');
-    });
 });
 
 const PORT = process.env.PORT || 3000;
