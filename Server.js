@@ -1,3 +1,5 @@
+// server.js
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -6,300 +8,138 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const PORT = 3000;
+// Statik dosyaları sunmak için
+app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
 
-// ---- DATA STRUCTURES ----
-let lobbies = {}; // { roomId: {users: [...], settings: {...}, gameState: {...}} }
-let users = {};   // { socket.id: username }
-
-// ---- CARD GAME HELPERS ----
-const CARD_TYPES = ['A', 'K', 'Q', 'J', '10', '9', '8', '7'];
-function getRandomCard() {
-    return CARD_TYPES[Math.floor(Math.random() * CARD_TYPES.length)];
-}
-function getRandomHand(n = 5) {
-    return Array(n).fill().map(getRandomCard);
-}
-
-// ---- SOCKET.IO ----
-io.on('connection', (socket) => {
-    console.log(`[SOCKET] Connected: ${socket.id}`);
-
-    // Kullanıcı giriş (tek username ile)
-    socket.on('login', (username, cb) => {
-        if (Object.values(users).includes(username)) {
-            cb({success: false, error: 'Bu kullanıcı adı kullanılıyor.'});
-            return;
-        }
-        users[socket.id] = username;
-        cb({success: true, username});
-        socket.emit('lobby-list', getLobbyList());
-    });
-
-    // Lobi listesini gönder
-    socket.on('get-lobbies', () => {
-        socket.emit('lobby-list', getLobbyList());
-    });
-
-    // Oda oluşturma (gelişmiş ayarlar ile)
-    /*
-      settings = {
-        maxUsers: Number,
-        maxCards: Number,
-        rounds: Number,
-        spectatorMode: Boolean
-      }
-    */
-    socket.on('create-room', (settings, cb) => {
-        // Basit validasyon
-        if (!settings ||
-            typeof settings.maxUsers !== 'number' ||
-            typeof settings.maxCards !== 'number' ||
-            typeof settings.rounds !== 'number' ||
-            typeof settings.spectatorMode !== 'boolean'
-        ) {
-            cb({success: false, error: 'Geçersiz ayarlar.'});
-            return;
-        }
-        // Max değerler sınırlandırılabilir
-        if (settings.maxUsers < 2 || settings.maxUsers > 12) {
-            cb({success: false, error: 'Kullanıcı sayısı 2-12 arasında olmalı.'});
-            return;
-        }
-        if (settings.maxCards < 1 || settings.maxCards > 10) {
-            cb({success: false, error: 'Kart sayısı 1-10 arasında olmalı.'});
-            return;
-        }
-        if (settings.rounds < 1 || settings.rounds > 20) {
-            cb({success: false, error: 'Raunt sayısı 1-20 arasında olmalı.'});
-            return;
-        }
-
-        let roomId = 'room_' + Math.random().toString(36).substr(2, 6);
-        lobbies[roomId] = {
-            users: [],
-            settings,
-            gameState: {
-                started: false,
-                tableCard: null,
-                hands: {},
-                placedCards: {},
-                originalCards: {},
-                bluff: false,
-                spectators: [],
-                round: 1,
-                scores: {},
-                roundActive: false
-            }
-        };
-        cb({success: true, roomId});
-        io.emit('lobby-list', getLobbyList());
-    });
-
-    // Random oda aç/gir
-    socket.on('join-random-room', () => {
-        let roomId = findAvailableRoom();
-        if (!roomId) {
-            // Varsayılan ayarlar ile yeni oda
-            roomId = createNewRoom({
-                maxUsers: 6,
-                maxCards: 5,
-                rounds: 5,
-                spectatorMode: true
-            });
-        }
-        joinRoom(socket, roomId);
-    });
-
-    // Odaya katıl
-    socket.on('join-room', (roomId, cb) => {
-        if (lobbies[roomId]) {
-            // Oda dolu mu kontrol et
-            if (lobbies[roomId].users.length >= lobbies[roomId].settings.maxUsers) {
-                cb && cb({success: false, error: 'Oda dolu.'});
-                return;
-            }
-            joinRoom(socket, roomId);
-            cb && cb({success: true, roomId});
-        } else {
-            cb && cb({success: false, error: 'Oda bulunamadı.'});
-        }
-    });
-
-    // Kart koyma
-    socket.on('place-cards', ({roomId, cards}, cb) => {
-        let lobby = lobbies[roomId];
-        if (!lobby || !lobby.gameState.started || !lobby.gameState.roundActive) return;
-
-        // Sadece max 2 kart koy
-        if (!Array.isArray(cards) || cards.length < 1 || cards.length > 2) {
-            cb && cb({success: false, error: 'Max 2 kart koyabilirsiniz.'});
-            return;
-        }
-
-        // Kullanıcı kartlarını masa üstüne koyar (kartlar "?")
-        lobby.gameState.placedCards[socket.id] = cards.map(() => '?');
-        lobby.gameState.originalCards[socket.id] = cards;
-        checkAllPlaced(socket, roomId);
-        cb && cb({success: true});
-    });
-
-    // Blöf basma
-    socket.on('bluff', (roomId) => {
-        let lobby = lobbies[roomId];
-        if (!lobby || !lobby.gameState.started || !lobby.gameState.roundActive) return;
-
-        lobby.gameState.bluff = true;
-        const blufferId = socket.id;
-        const tableCard = lobby.gameState.tableCard;
-        const order = lobby.users.filter(uid => !lobby.gameState.spectators.includes(uid)); // Sadece aktif oyuncular
-        let reveal = {};
-        for (let uid of order) {
-            reveal[users[uid]] = lobby.gameState.originalCards[uid];
-        }
-        io.to(roomId).emit('reveal-cards', reveal);
-
-        // Blöf basan oyuncudan önce kart koyanları bul
-        const blufferIndex = order.indexOf(blufferId);
-        let beforeBluffer = order.slice(0, blufferIndex);
-
-        // Eğer blöf basan oyuncudan önce koyanlardan herhangi biri hedef kartı koymuşsa blöf basan yanar
-        let blufferBomb = false;
-        for (let uid of beforeBluffer) {
-            if (lobby.gameState.originalCards[uid] && lobby.gameState.originalCards[uid].includes(tableCard)) {
-                blufferBomb = true;
-                break;
-            }
-        }
-
-        let bombTargets = [];
-        if (blufferBomb) {
-            // Blöf basan yanar
-            bombTargets = [blufferId];
-        } else {
-            // Blöf basan oyuncudan önce koyanlardan hiçbiri hedef kart koymadıysa, hedef kart koymayanlar yanar
-            for (let uid of beforeBluffer) {
-                if (!lobby.gameState.originalCards[uid] || !lobby.gameState.originalCards[uid].includes(tableCard)) {
-                    bombTargets.push(uid);
-                }
-            }
-        }
-
-        // İzleyici modu kapalıysa kimse yanmaz
-        if (!lobby.settings.spectatorMode) bombTargets = [];
-
-        // Bomba sayacı başlat
-        if (bombTargets.length > 0) {
-            let countdown = 3;
-            let interval = setInterval(() => {
-                io.to(roomId).emit('bomb-timer', {targets: bombTargets.map(uid => users[uid]), countdown});
-                countdown--;
-                if (countdown < 0) {
-                    clearInterval(interval);
-                    // Patlama: izleme moduna geçiş
-                    bombTargets.forEach(uid => {
-                        if (!lobby.gameState.spectators.includes(uid)) {
-                            lobby.gameState.spectators.push(uid);
-                            io.to(uid).emit('spectator-mode');
-                        }
-                    });
-                    // Tur sonu
-                    finishRound(roomId);
-                }
-            }, 1000);
-        } else {
-            // Bomba yoksa direkt tur sonu
-            finishRound(roomId);
-        }
-    });
-
-    // Kullanıcı çıkışı
-    socket.on('disconnect', () => {
-        let username = users[socket.id];
-        delete users[socket.id];
-        // Odalardan çıkar
-        for (let roomId in lobbies) {
-            let i = lobbies[roomId].users.indexOf(socket.id);
-            if (i !== -1) lobbies[roomId].users.splice(i, 1);
-            // Oda boşsa sil
-            if (lobbies[roomId].users.length === 0) delete lobbies[roomId];
-        }
-        io.emit('lobby-list', getLobbyList());
-        console.log(`[SOCKET] Disconnected: ${socket.id}`);
-    });
-
-    // İzleyici modunu kapat/aç (oda ayarlarında güncelle)
-    socket.on('toggle-spectator-mode', ({roomId, value}, cb) => {
-        let lobby = lobbies[roomId];
-        if (!lobby) {
-            cb && cb({success: false, error: 'Oda bulunamadı.'});
-            return;
-        }
-        lobby.settings.spectatorMode = !!value;
-        cb && cb({success: true});
-        io.emit('lobby-list', getLobbyList());
-    });
+// Ana sayfa: Kod gönderme formu
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Node.js Kod Sunucusu</title>
+            <style>
+                body { font-family: sans-serif; padding: 20px; }
+                h1 { color: #333; }
+                form { border: 1px solid #ccc; padding: 20px; border-radius: 8px; max-width: 600px; margin-top: 20px; }
+                input[type="text"], textarea { width: 100%; padding: 10px; margin: 8px 0; box-sizing: border-box; }
+                button { background-color: #4CAF50; color: white; padding: 14px 20px; margin: 8px 0; border: none; cursor: pointer; width: 100%; }
+                button:hover { opacity: 0.8; }
+                a { color: #007BFF; text-decoration: none; }
+            </style>
+        </head>
+        <body>
+            <h1>Yeni Bir Kod Sunucusu Oluştur</h1>
+            <p>Aşağıdaki formu kullanarak kendi kod ID'nizi ve kod içeriğinizi girin. Her ID için özel bir sunucu sayfası oluşturulacaktır.</p>
+            <form action="/publish" method="POST">
+                <label for="id"><b>Sunucu ID'si:</b></label>
+                <input type="text" id="id" name="id" required placeholder="Örn: benim-sunucum">
+                
+                <label for="code"><b>Kod İçeriği:</b></label>
+                <textarea id="code" name="code" rows="10" required placeholder="Örn: const express = require('express'); ..."></textarea>
+                
+                <button type="submit">Yayınla</button>
+            </form>
+        </body>
+        </html>
+    `);
 });
 
-// ---- HELPERS ----
-function getLobbyList() {
-    return Object.keys(lobbies).map(roomId => ({
-        roomId,
-        users: lobbies[roomId].users.map(uid => users[uid]),
-        started: lobbies[roomId].gameState?.started,
-        settings: lobbies[roomId].settings,
-        round: lobbies[roomId].gameState?.round,
-        spectators: lobbies[roomId].gameState?.spectators.map(uid => users[uid])
-    }));
-}
+// Kod yayınlama endpoint'i
+app.post('/publish', (req, res) => {
+    const { id, code } = req.body;
 
-function findAvailableRoom() {
-    // Boş oda bul (oda ayarına göre)
-    for (let roomId in lobbies) {
-        const lobby = lobbies[roomId];
-        if (
-            lobby.users.length < lobby.settings.maxUsers &&
-            !lobby.gameState.started
-        ) return roomId;
-    }
-    return null;
-}
-
-function createNewRoom(settings) {
-    let roomId = 'room_' + Math.random().toString(36).substr(2, 6);
-    lobbies[roomId] = {
-        users: [],
-        settings,
-        gameState: {
-            started: false,
-            tableCard: null,
-            hands: {},
-            placedCards: {},
-            originalCards: {},
-            bluff: false,
-            spectators: [],
-            round: 1,
-            scores: {},
-            roundActive: false
-        }
-    };
-    return roomId;
-}
-
-function joinRoom(socket, roomId) {
-    let lobby = lobbies[roomId];
-    if (!lobby.users.includes(socket.id)) lobby.users.push(socket.id);
-    socket.join(roomId);
-
-    // Oyun başlamadıysa ve oda dolmuşsa veya en az 2 kişi varsa başlat
-    if (!lobby.gameState.started &&
-        lobby.users.length >= 2 &&
-        (lobby.users.length === lobby.settings.maxUsers)
-    ) {
-        startGame(roomId);
+    if (!id || !code) {
+        return res.status(400).send('ID ve kod içeriği zorunludur.');
     }
 
-    io.emit('lobby-list', getLobbyList());
+    // Her ID için ayrı bir Socket.IO namespace oluştur
+    const namespace = io.of(`/${id}`);
+    console.log(`Yeni bir namespace oluşturuldu: /${id}`);
+
+    namespace.on('connection', (socket) => {
+        console.log(`Bir kullanıcı /${id} sunucusuna bağlandı.`);
+
+        // Bağlanan kullanıcıya kodu gönder
+        socket.emit('code-content', code);
+
+        socket.on('disconnect', () => {
+            console.log(`Bir kullanıcı /${id} sunucusundan ayrıldı.`);
+        });
+    });
+
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Başarılı</title>
+            <style>
+                body { font-family: sans-serif; padding: 20px; }
+            </style>
+        </head>
+        <body>
+            <h1>Kodunuz Başarıyla Yayınlandı!</h1>
+            <p>Sunucunuz hazır. Aşağıdaki bağlantıya tıklayarak kodunuza erişin:</p>
+            <a href="/server/${id}">http://localhost:3000/server/${id}</a>
+        </body>
+        </html>
+    `);
+});
+
+// Her ID için ayrı bir sunucu sayfası
+app.get('/server/:id', (req, res) => {
+    const id = req.params.id;
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Sunucu: ${id}</title>
+            <style>
+                body { font-family: sans-serif; padding: 20px; }
+                pre { background-color: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; }
+            </style>
+        </head>
+        <body>
+            <h1>Sunucu ID: ${id}</h1>
+            <p>Bu sunucuya ait kod içeriği aşağıdadır:</p>
+            <pre id="code-display"></pre>
+            
+            <script src="/socket.io/socket.io.js"></script>
+            <script>
+                // URL'den ID'yi al
+                const id = window.location.pathname.split('/').pop();
+                
+                // Belirli bir namespace'e bağlan
+                const socket = io('/' + id);
+                
+                socket.on('connect', () => {
+                    console.log('Sunucuya bağlandı!');
+                });
+                
+                socket.on('code-content', (code) => {
+                    document.getElementById('code-display').textContent = code;
+                    console.log('Kod içeriği alındı:', code);
+                });
+
+                socket.on('disconnect', () => {
+                    console.log('Sunucudan ayrıldı.');
+                });
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Sunucu http://localhost:${PORT} adresinde çalışıyor.`);
+});
+
+bbyList());
 }
 
 // Oyun başlat
