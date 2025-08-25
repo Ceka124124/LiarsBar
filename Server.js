@@ -8,8 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// Statik dosyaları sunmak için "public" klasörünü kullanır
-app.use(express.static('public'));
+// Statik dosyaları sunmak için "public" klasörünü kullan
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
