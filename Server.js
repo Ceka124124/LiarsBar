@@ -25,7 +25,7 @@ const PORT = process.env.PORT || 3000;
 let tiktokLiveConnection = null;
 
 // URL'den kullanıcı adını alacak ve canlı yayına bağlanacak rota
-app.get('/connect', (req, res) => {
+app.get('/connect', async (req, res) => {
     const tiktokUsername = req.query.user;
 
     // Eğer kullanıcı adı belirtilmemişse hata gönder
@@ -42,17 +42,17 @@ app.get('/connect', (req, res) => {
     // Yeni bir bağlantı nesnesi oluşturun
     tiktokLiveConnection = new WebcastPushConnection(tiktokUsername);
 
-    // TikTok Live olaylarını dinlemeye başlayın
-    tiktokLiveConnection.connect().then(state => {
+    try {
+        const state = await tiktokLiveConnection.connect();
         const username = state.roomInfo.owner.uniqueId;
         console.log(`TikTok canlı yayınına başarıyla bağlandı! Kullanıcı: ${username}`);
         io.emit('status', `"${username}" kullanıcısının canlı yayınına bağlandı.`);
         res.send(`"${username}" kullanıcısının canlı yayınına bağlandı.`);
-    }).catch(err => {
+    } catch (err) {
         console.error('TikTok canlı yayınına bağlanırken bir hata oluştu:', err);
-        io.emit('status', `"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı.`);
-        res.status(500).send(`"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı. Hata: ${err.message}`);
-    });
+        io.emit('status', `"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı. Lütfen kullanıcının canlı yayında olduğundan emin olun.`);
+        return res.status(500).send(`"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı. Hata: ${err.message}`);
+    }
 
     // TikTok Live etkinlikleri için dinleyici kurun
     // Yeni bir sohbet mesajı geldiğinde
