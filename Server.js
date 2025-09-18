@@ -1,131 +1,232 @@
-// Gerekli modülleri import edin
 const express = require('express');
-const http = require('http');
-const { Server } = require("socket.io");
-const { WebcastPushConnection } = require('tiktok-live-connector');
-const cors = require('cors'); // CORS modülü eklendi
-
-// Sunucuyu ve Socket.IO'yu kurun
+const axios = require('axios');
+const cheerio = require('cheerio');
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: "*", // Tüm domainlerden gelen isteklere izin ver
-        methods: ["GET", "POST"]
-    }
-});
+const port = 3000;
 
-// CORS'u Express uygulaması için etkinleştirin
-app.use(cors());
+app.use(express.json());
 
-// Uygulamanın dinleyeceği port
-const PORT = process.env.PORT || 3000;
-
-// Bağlantı nesnesini saklamak için bir değişken
-let tiktokLiveConnection = null;
-
-// URL'den kullanıcı adını alacak ve canlı yayına bağlanacak rota
-app.get('/connect', async (req, res) => {
-    const tiktokUsername = req.query.user;
-
-    // Eğer kullanıcı adı belirtilmemişse hata gönder
-    if (!tiktokUsername) {
-        return res.status(400).send('Lütfen bir TikTok kullanıcı adı sağlayın. Örnek: /connect?user=tiktok');
-    }
-
-    // Eğer mevcut bir bağlantı varsa kapatın
-    if (tiktokLiveConnection) {
-        tiktokLiveConnection.disconnect();
-        tiktokLiveConnection = null;
-    }
-
-    // Yeni bir bağlantı nesnesi oluşturun
-    tiktokLiveConnection = new WebcastPushConnection(tiktokUsername);
-
+// Base64 decode fonksiyonu
+function decodeBase64(str) {
     try {
-        const state = await tiktokLiveConnection.connect();
-        const username = state.roomInfo.owner.uniqueId;
-        console.log(`TikTok canlı yayınına başarıyla bağlandı! Kullanıcı: ${username}`);
-        io.emit('status', `"${username}" kullanıcısının canlı yayınına bağlandı.`);
-        res.send(`"${username}" kullanıcısının canlı yayınına bağlandı.`);
-    } catch (err) {
-        console.error('TikTok canlı yayınına bağlanırken bir hata oluştu:', err);
-        io.emit('status', `"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı. Lütfen kullanıcının canlı yayında olduğundan emin olun.`);
-        return res.status(500).send(`"${tiktokUsername}" kullanıcısının yayınına bağlanılamadı. Hata: ${err.message}`);
+        return Buffer.from(str, 'base64').toString('utf-8');
+    } catch (error) {
+        console.error('Base64 decode hatası:', error);
+        return null;
     }
+}
 
-    // TikTok Live etkinlikleri için dinleyici kurun
-    // Yeni bir sohbet mesajı geldiğinde
-    tiktokLiveConnection.on('chat', data => {
-        console.log(`${data.uniqueId}: ${data.comment}`);
-        io.emit('chat', {
-            nickname: data.nickname,
-            comment: data.comment
+// Nonce'yi çıkaran fonksiyon
+function extractNonce(decodedData) {
+    try {
+        // JSON parse etmeyi dene
+        const jsonData = JSON.parse(decodedData);
+        if (jsonData.nonce) {
+            return jsonData.nonce;
+        }
+    } catch (error) {
+        // JSON değilse regex ile nonce'yi bul
+        const nonceMatch = decodedData.match(/nonce["\s]*[:=]["\s]*([a-zA-Z0-9]+)/i);
+        if (nonceMatch && nonceMatch[1]) {
+            return nonceMatch[1];
+        }
+    }
+    return null;
+}
+
+// Ana endpoint
+app.get('/sorgu', async (req, res) => {
+    try {
+        const { id } = req.query;
+        
+        if (!id) {
+            return res.status(400).json({ 
+                error: 'ID parametresi gerekli', 
+                usage: '/sorgu?id=YOUR_ID' 
+            });
+        }
+
+        console.log(`ID ile sorgu başlatılıyor: ${id}`);
+
+        // Starmaker sitesinden veri çek
+        const response = await axios.get('https://starmaker.id.vn/', {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            },
+            timeout: 10000
         });
-    });
 
-    // Bir kullanıcı "beğen"diğinde
-    tiktokLiveConnection.on('like', data => {
-        console.log(`${data.uniqueId} ${data.likeCount} kez beğendi.`);
-        io.emit('like', {
-            nickname: data.nickname,
-            likeCount: data.likeCount
+        const $ = cheerio.load(response.data);
+
+        // Script tag'ini bul ve base64 verisini çıkar
+        let base64Data = null;
+        let nonce = null;
+
+        // info-id-sm-script-js-extra script'ini bul
+        const targetScript = $('#info-id-sm-script-js-extra');
+        
+        if (targetScript.length > 0) {
+            const scriptSrc = targetScript.attr('src');
+            if (scriptSrc && scriptSrc.startsWith('data:text')) {
+                // data:text/javascript;base64, kısmını kaldır
+                const base64Part = scriptSrc.split(',')[1];
+                if (base64Part) {
+                    base64Data = base64Part;
+                    const decodedData = decodeBase64(base64Data);
+                    if (decodedData) {
+                        nonce = extractNonce(decodedData);
+                        console.log('Decoded data:', decodedData.substring(0, 200) + '...');
+                        console.log('Çıkarılan nonce:', nonce);
+                    }
+                }
+            }
+        }
+
+        // Alternatif olarak tüm script tag'lerini kontrol et
+        if (!nonce) {
+            $('script').each((index, element) => {
+                const scriptContent = $(element).html() || '';
+                const scriptSrc = $(element).attr('src') || '';
+                
+                // Inline script'lerde nonce ara
+                if (scriptContent.includes('nonce')) {
+                    const nonceMatch = scriptContent.match(/nonce["\s]*[:=]["\s]*["']([a-zA-Z0-9]+)["']/i);
+                    if (nonceMatch && nonceMatch[1]) {
+                        nonce = nonceMatch[1];
+                        console.log('Script içeriğinden nonce bulundu:', nonce);
+                        return false; // jQuery each'den çık
+                    }
+                }
+
+                // data: URL'lerde base64 ara
+                if (scriptSrc.startsWith('data:text') && scriptSrc.includes('base64')) {
+                    const base64Part = scriptSrc.split(',')[1];
+                    if (base64Part) {
+                        const decodedData = decodeBase64(base64Part);
+                        if (decodedData) {
+                            const foundNonce = extractNonce(decodedData);
+                            if (foundNonce) {
+                                nonce = foundNonce;
+                                base64Data = base64Part;
+                                console.log('Data URL\'den nonce bulundu:', nonce);
+                                return false; // jQuery each'den çık
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        if (!nonce) {
+            return res.status(404).json({ 
+                error: 'Nonce bulunamadı',
+                debug: {
+                    scriptsFound: $('script').length,
+                    targetScriptFound: targetScript.length > 0,
+                    base64DataFound: !!base64Data
+                }
+            });
+        }
+
+        // Payload hazırla
+        const payload = {
+            id: id,
+            nonce: nonce,
+            timestamp: Date.now()
+        };
+
+        console.log('Gönderilecek payload:', payload);
+
+        // POST isteği gönder
+        const apiResponse = await axios.post(`https://starmaker.id.vn/sorgu?id=${id}`, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'application/json',
+                'Origin': 'https://starmaker.id.vn',
+                'Referer': 'https://starmaker.id.vn/'
+            },
+            timeout: 15000
         });
-    });
 
-    // Bir hediye gönderildiğinde
-    tiktokLiveConnection.on('gift', data => {
-        console.log(`${data.uniqueId} bir hediye gönderdi: ${data.giftName}`);
-        io.emit('gift', {
-            nickname: data.nickname,
-            giftName: data.giftName,
-            repeatCount: data.repeatCount
+        // JSON yanıtını döndür
+        res.json({
+            success: true,
+            data: apiResponse.data,
+            debug: {
+                nonce: nonce,
+                base64Found: !!base64Data,
+                payloadSent: payload
+            }
         });
-    });
 
-    // Yeni bir üye katıldığında
-    tiktokLiveConnection.on('member', data => {
-        console.log(`${data.uniqueId} katıldı.`);
-        io.emit('member', {
-            nickname: data.nickname
-        });
-    });
+    } catch (error) {
+        console.error('Hata:', error.message);
+        
+        let errorDetails = {
+            success: false,
+            error: error.message,
+            type: 'unknown'
+        };
 
-    // Yayın paylaşımı
-    tiktokLiveConnection.on('share', data => {
-        console.log(`${data.uniqueId} yayını paylaştı.`);
-        io.emit('share', {
-            nickname: data.nickname
-        });
-    });
+        if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+            errorDetails.type = 'connection';
+            errorDetails.message = 'Siteye bağlanılamıyor';
+        } else if (error.response) {
+            errorDetails.type = 'http';
+            errorDetails.statusCode = error.response.status;
+            errorDetails.statusText = error.response.statusText;
+            errorDetails.data = error.response.data;
+        } else if (error.code === 'ECONNABORTED') {
+            errorDetails.type = 'timeout';
+            errorDetails.message = 'İstek zaman aşımına uğradı';
+        }
 
-    // Yeni bir takipçi geldiğinde
-    tiktokLiveConnection.on('follow', data => {
-        console.log(`${data.uniqueId} takip etmeye başladı.`);
-        io.emit('follow', {
-            nickname: data.nickname
-        });
-    });
+        res.status(500).json(errorDetails);
+    }
+});
 
-    // Hata yönetimi
-    tiktokLiveConnection.on('streamEnd', () => {
-        console.log('Canlı yayın sona erdi.');
-        io.emit('streamEnd', 'Canlı yayın sona erdi.');
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        service: 'Starmaker API Proxy',
+        timestamp: new Date().toISOString()
     });
 });
 
-// Socket.IO bağlantısını yönetin
-io.on('connection', (socket) => {
-    console.log('Yeni bir istemci bağlandı');
-
-    socket.on('disconnect', () => {
-        console.log('Bir istemci bağlantısı kesildi');
+// Ana sayfa
+app.get('/', (req, res) => {
+    res.json({
+        service: 'Starmaker API Proxy',
+        usage: 'GET /sorgu?id=YOUR_ID',
+        description: 'Starmaker sitesinden nonce çeker ve API\'ye post gönderir',
+        endpoints: {
+            '/sorgu?id=ID': 'Ana sorgu endpoint\'i',
+            '/health': 'Sistem durumu kontrolü'
+        }
     });
 });
 
-server.listen(PORT, () => {
-    // Sunucu varsayılan olarak tüm ağ arayüzlerini dinler.
-    // Bu, sunucunun yerel ağ veya internet üzerinden erişilebilir olduğu anlamına gelir.
-    console.log(`Sunucu ${PORT} portunda herkese açık olarak çalışıyor.`);
-    console.log(`Bir canlı yayına bağlanmak için tarayıcınızda http://SUNUCU_IP_ADRESINIZ:${PORT}/connect?user=KULLANICI_ADI adresini ziyaret edin.`);
+// Server başlat
+app.listen(port, () => {
+    console.log(`🚀 Server ${port} portunda çalışıyor`);
+    console.log(`📡 Kullanım: http://localhost:${port}/sorgu?id=YOUR_ID`);
+    console.log(`❤️  Health check: http://localhost:${port}/health`);
 });
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('Server kapatılıyor...');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('\nServer kapatılıyor...');
+    process.exit(0);
+});axios.post
