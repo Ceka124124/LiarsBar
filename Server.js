@@ -168,9 +168,9 @@ app.get('/api/attk', async (req, res) => {
     }
 
     const count = parseInt(adet);
-    if (isNaN(count) || count <= 0 || count > 10) {
+    if (isNaN(count) || count <= 0 || count > 10000) {
         return res.status(400).json({
-            error: "Adet (eşzamanlı istek sayısı) 1 ile 10 arasında bir sayı olmalıdır."
+            error: "Adet (eşzamanlı istek sayısı) 1 ile 100 arasında bir sayı olmalıdır."
         });
     }
 
