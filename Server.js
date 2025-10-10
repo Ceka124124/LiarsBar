@@ -1,9 +1,15 @@
+require('dotenv').config(); // .env dosyasındaki değişkenleri yükler
 const express = require('express');
 const axios = require('axios');
 const app = express();
 const port = 3000;
 
-// E-posta sağlayıcıları ve kelime listesi (Python betiğinden alınmıştır)
+// Çevresel değişkenlerden alın
+// .env dosyasında tanımlanmalıdır: BOT_TOKEN=..., USER_ID=...
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const USER_ID = process.env.USER_ID;
+
+// E-posta sağlayıcıları ve kelime listesi (Önceki betikten alınmıştır)
 const emailProviders = ['gmail.com'];
 const WORD_LIST = [
     "enesbatur","bravo","fan","delta","echo","foxtrot","golf","hotel","india","juliet",
@@ -18,11 +24,11 @@ const WORD_LIST = [
     "atlas","zeus","hera","apollo","artemis","ares","poseidon","demeter","hestia","hermes"
 ];
 
-// Rastgele kullanıcı adı ve e-posta oluşturan yardımcı fonksiyon
+// --- Yardımcı Fonksiyonlar (Aynı Kaldı) ---
+
 function generateRandomEmail() {
-    // kullanıcı adı: kelime + 2–4 basamaklı rastgele sayı
     const word = WORD_LIST[Math.floor(Math.random() * WORD_LIST.length)];
-    const suffixLength = Math.floor(Math.random() * 3) + 2; // 2, 3 veya 4
+    const suffixLength = Math.floor(Math.random() * 3) + 2; 
     const suffix = String(Math.floor(Math.random() * 10**suffixLength)).padStart(suffixLength, '0');
     
     const name = `${word}${suffix}`;
@@ -33,16 +39,8 @@ function generateRandomEmail() {
     };
 }
 
-/**
- * !!! ÖNEMLİ: Bu, Instagram kontrolü için bir yer tutucudur.
- * Gerçek Instagram API etkileşimi için harici bir kütüphane (örneğin, instagram-private-api)
- * kullanmanız veya kendi ters mühendislik (reverse engineering) mantığınızı eklemeniz gerekir.
- * Python betiğindeki `ms4` modülü Node.js'e doğrudan çevrilemez.
- * * Bu fonksiyon, yalnızca rastgele bir sonuç döndürür.
- */
 async function checkInstagram(username) {
-    // Gerçek API çağrısını burada yapın.
-    // Başarılı (HIT) olma olasılığı
+    // SİMÜLASYON: Gerçek API çağrısını burada yapın.
     const isHit = Math.random() < 0.2; // %20 HIT şansı
 
     if (isHit) {
@@ -52,7 +50,7 @@ async function checkInstagram(username) {
             email: `${username}@gmail.com`,
             followers: Math.floor(Math.random() * 1000) + 50,
             isPrivate: Math.random() < 0.5,
-            info_checked: true // Gerçekte, buradan Instagram'dan gelen detayları döndürürsünüz
+            info_checked: true
         };
     } else {
         return {
@@ -63,14 +61,17 @@ async function checkInstagram(username) {
     }
 }
 
-// Telegram'a sonuç gönderen fonksiyon
 async function sendToTelegram(token, userId, message) {
+    if (!token || !userId) {
+        console.error("Telegram token veya kullanıcı kimliği eksik. Gönderim atlandı.");
+        return false;
+    }
     const telegramApiUrl = `https://api.telegram.org/bot${token}/sendMessage`;
     try {
         await axios.post(telegramApiUrl, {
             chat_id: userId,
             text: message,
-            parse_mode: 'HTML' // Mesajınızı HTML ile biçimlendirmek isterseniz
+            parse_mode: 'HTML'
         });
         return true;
     } catch (error) {
@@ -79,17 +80,21 @@ async function sendToTelegram(token, userId, message) {
     }
 }
 
-// Ana API rotası
-// URL: /api/check?BotToken={token}&userid={id}&adet={max 100}
-app.get('/api/check', async (req, res) => {
-    // 1. Parametreleri al
-    const { BotToken, userid, adet } = req.query;
+// --- 1. INSTAGRAM KONTROL API'SI (Önceki /api/check) ---
 
-    // 2. Parametre doğrulama
-    if (!BotToken || !userid || !adet) {
+/**
+ * URL: /api/check?adet={max 100}
+ * Parametreleri doğrudan query string'den almak yerine,
+ * Telegram için gerekli BOT_TOKEN ve USER_ID'yi .env dosyasından okur.
+ */
+app.get('/api/check', async (req, res) => {
+    const { adet } = req.query;
+
+    // Parametre doğrulama
+    if (!adet) {
         return res.status(400).json({
-            error: "Eksik parametreler. Gerekli: BotToken, userid, adet.",
-            kullanim: "/api/check?BotToken={token}&userid={id}&adet={max 100}"
+            error: "Eksik parametreler. Gerekli: adet (kaç adet hesap çekilecek).",
+            kullanim: "/api/check?adet=10"
         });
     }
 
@@ -103,10 +108,9 @@ app.get('/api/check', async (req, res) => {
     const results = [];
     const checkPromises = [];
 
-    // 3. İstenen adet kadar kontrolü eşzamanlı olarak başlat
+    // İstenen adet kadar kontrolü eşzamanlı olarak başlat
     for (let i = 0; i < count; i++) {
         const { username, email } = generateRandomEmail();
-        // Tüm kontrolleri Promise olarak bir diziye ekle
         checkPromises.push(
             checkInstagram(username)
             .then(async (result) => {
@@ -114,17 +118,15 @@ app.get('/api/check', async (req, res) => {
                 // Eğer HIT ise Telegram'a gönder
                 if (result.status === 'HIT') {
                     const tgMessage = `
-⌯ Hesap Bilgisi ⌯ 
-Kullanıcı Adı: @${result.username}
+**⌯ Hesap Bilgisi ⌯** Kullanıcı Adı: @${result.username}
 E-posta: ${result.email}
 Takipçi: ${result.followers}
 Gizli mi: ${result.isPrivate ? 'Evet' : 'Hayır'}
 Profil URL: https://www.instagram.com/${result.username}
 `;
-                    await sendToTelegram(BotToken, userid, tgMessage);
+                    await sendToTelegram(BOT_TOKEN, USER_ID, tgMessage);
                 }
             })
-            // Hata olursa (örneğin, API isteği başarısız olursa) yine de devam et
             .catch(error => {
                 results.push({
                     status: 'ERROR',
@@ -135,10 +137,10 @@ Profil URL: https://www.instagram.com/${result.username}
         );
     }
 
-    // 4. Tüm kontrollerin bitmesini bekle
+    // Tüm kontrollerin bitmesini bekle
     await Promise.all(checkPromises);
 
-    // 5. Sonuçları JSON olarak döndür
+    // Sonuçları JSON olarak döndür
     res.json({
         success: true,
         requested_count: count,
@@ -148,10 +150,78 @@ Profil URL: https://www.instagram.com/${result.username}
     });
 });
 
-// Sunucuyu başlat
-app.listen(port, () => {
-    console.log(`Node.js Instagram API'si http://localhost:${port} adresinde çalışıyor`);
-    console.log(`Kullanım örneği: http://localhost:${port}/api/check?BotToken=YOUR_TOKEN&userid=YOUR_ID&adet=10`);
+
+// --- 2. YÜK TESTİ / SALDIRI API'SI (Yeni /api/attk) ---
+
+/**
+ * URL: /api/attk?url={hedef_url}&adet={max 10}
+ */
+app.get('/api/attk', async (req, res) => {
+    const { url, adet } = req.query;
+
+    // 1. Parametre doğrulama
+    if (!url || !adet) {
+        return res.status(400).json({
+            error: "Eksik parametreler. Gerekli: url (Hedef API) ve adet (Eşzamanlı istek sayısı).",
+            kullanim: "/api/attk?url=http://localhost:3000/api/check?adet=10&adet=5"
+        });
+    }
+
+    const count = parseInt(adet);
+    if (isNaN(count) || count <= 0 || count > 10) {
+        return res.status(400).json({
+            error: "Adet (eşzamanlı istek sayısı) 1 ile 10 arasında bir sayı olmalıdır."
+        });
+    }
+
+    const attackResults = [];
+    const attackPromises = [];
+
+    // 2. Belirtilen adet kadar eşzamanlı istek başlat
+    for (let i = 0; i < count; i++) {
+        // Her istek için bir Promise oluştur
+        const promise = axios.get(url, {
+            // Basit bir User-Agent ekleyelim
+            headers: {
+                'User-Agent': `Node-LoadTester/1.0 (${i + 1}/${count})`
+            }
+        })
+        .then(response => {
+            attackResults.push({
+                status: 'SUCCESS',
+                statusCode: response.status,
+                // Yanıtın ilk 50 karakterini kaydet
+                data_snippet: JSON.stringify(response.data).substring(0, 50) + '...'
+            });
+        })
+        .catch(error => {
+            attackResults.push({
+                status: 'ERROR',
+                statusCode: error.response ? error.response.status : 'N/A',
+                message: error.message
+            });
+        });
+        attackPromises.push(promise);
+    }
+
+    // 3. Tüm isteklerin bitmesini bekle
+    await Promise.all(attackPromises);
+
+    // 4. Sonuçları döndür
+    res.json({
+        success: true,
+        target_url: url,
+        requested_concurrent_count: count,
+        results: attackResults
+    });
 });
 
+
+// Sunucuyu başlat
+app.listen(port, () => {
+    console.log(`Sunucu http://localhost:${port} adresinde çalışıyor`);
+    console.log('--- Kullanım Örnekleri ---');
+    console.log(`1. Kontrol API'si: http://localhost:${port}/api/check?adet=5`);
+    console.log(`2. Yük Testi API'si: http://localhost:${port}/api/attk?url=http://localhost:${port}/api/check?adet=1&adet=3`);
+});
             
