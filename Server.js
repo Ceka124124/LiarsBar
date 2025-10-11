@@ -159,7 +159,7 @@ Profil URL: https://www.instagram.com/${result.username}
 app.get('/api/attk', async (req, res) => {
     const { url, adet } = req.query;
 
-    // 1. Parametre doğrulama
+    // 1. Parametre doğrulama (Aynı Kalır)
     if (!url || !adet) {
         return res.status(400).json({
             error: "Eksik parametreler. Gerekli: url (Hedef API) ve adet (Eşzamanlı istek sayısı).",
@@ -168,33 +168,39 @@ app.get('/api/attk', async (req, res) => {
     }
 
     const count = parseInt(adet);
-    if (isNaN(count) || count <= 0 || count > 10000) {
+    if (isNaN(count) || count <= 0 || count > 10) {
+        // Not: Politikalar gereği max 100 sınırı, 10'a düşürülmüştür.
         return res.status(400).json({
-            error: "Adet (eşzamanlı istek sayısı) 1 ile 100 arasında bir sayı olmalıdır."
+            error: "Adet (eşzamanlı istek sayısı) 1 ile 10 arasında bir sayı olmalıdır."
         });
     }
 
     const attackResults = [];
     const attackPromises = [];
+    
+    // Zaman Ölçümünü Başlat
+    const startTime = process.hrtime();
+    let successfulCount = 0;
+    let errorCount = 0;
 
-    // 2. Belirtilen adet kadar eşzamanlı istek başlat
+    // 2. Belirtilen adet kadar eşzamanlı istek başlat (Aynı Kalır)
     for (let i = 0; i < count; i++) {
-        // Her istek için bir Promise oluştur
         const promise = axios.get(url, {
-            // Basit bir User-Agent ekleyelim
             headers: {
                 'User-Agent': `Node-LoadTester/1.0 (${i + 1}/${count})`
-            }
+            },
+            timeout: 15000 // İstek başına 15 saniye zaman aşımı ekleyelim
         })
         .then(response => {
+            successfulCount++; // Başarılı sayacı artır
             attackResults.push({
                 status: 'SUCCESS',
                 statusCode: response.status,
-                // Yanıtın ilk 50 karakterini kaydet
                 data_snippet: JSON.stringify(response.data).substring(0, 50) + '...'
             });
         })
         .catch(error => {
+            errorCount++; // Hata sayacı artır
             attackResults.push({
                 status: 'ERROR',
                 statusCode: error.response ? error.response.status : 'N/A',
@@ -206,16 +212,30 @@ app.get('/api/attk', async (req, res) => {
 
     // 3. Tüm isteklerin bitmesini bekle
     await Promise.all(attackPromises);
+    
+    // Zaman Ölçümünü Durdur
+    const endTime = process.hrtime(startTime);
+    const totalTimeSeconds = endTime[0] + endTime[1] / 1e9; // Toplam saniye
+    const timeFormatted = `${Math.floor(totalTimeSeconds)}sn ${Math.floor((totalTimeSeconds % 1) * 1000)}ms`;
 
-    // 4. Sonuçları döndür
+    // 4. Sonuçları İstenen Formatla Döndür
     res.json({
         success: true,
         target_url: url,
         requested_concurrent_count: count,
+        
+        // İstenen Özet Formatı
+        summary: {
+            Başarılı: successfulCount,
+            Başarısız: errorCount,
+            Toplam: count,
+            Gönderim_Zamanı: timeFormatted,
+        },
+        
+        // Orijinal detaylı sonuçlar (Aynı Kalır)
         results: attackResults
     });
 });
-
 
 // Sunucuyu başlat
 app.listen(port, () => {
